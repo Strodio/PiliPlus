@@ -1,0 +1,75 @@
+default_platform(:ios)
+
+def match_readonly?
+  value = ENV["MATCH_READONLY"] || "true"
+  value.strip.downcase != "false"
+end
+
+platform :ios do
+  desc "Build a signed IPA and upload it to TestFlight"
+  lane :beta do
+    create_keychain(
+      name: ENV["TEMP_KEYCHAIN_NAME"],
+      password: ENV["TEMP_KEYCHAIN_PASSWORD"],
+      default_keychain: true,
+      unlock: true,
+      timeout: 3600,
+      lock_when_sleeps: true
+    )
+
+    api_key = app_store_connect_api_key(
+      key_id: ENV["APP_STORE_CONNECT_KEY_ID"],
+      issuer_id: ENV["APP_STORE_CONNECT_ISSUER_ID"],
+      key_content: ENV["APP_STORE_CONNECT_API_KEY"],
+      is_key_content_base64: false,
+      in_house: false
+    )
+
+    match(
+      type: "appstore",
+      readonly: match_readonly?,
+      app_identifier: ENV["BUNDLE_ID"],
+      api_key: api_key,
+      git_url: "git@github.com:Strodio/certificates.git",
+      git_private_key: ENV["MATCH_DEPLOY_KEY"],
+      keychain_name: ENV["TEMP_KEYCHAIN_NAME"],
+      keychain_password: ENV["TEMP_KEYCHAIN_PASSWORD"]
+    )
+
+    # Compile the Dart/plugin side without signing, then let gym archive & sign.
+    Dir.chdir("..") do
+      sh("flutter build ios --release --dart-define-from-file=pili_release.json --no-pub --no-codesign")
+    end
+
+    update_code_signing_settings(
+      use_automatic_signing: false,
+      path: "Runner.xcodeproj",
+      team_id: ENV["APPLE_TEAM_ID"],
+      bundle_identifier: ENV["BUNDLE_ID"],
+      code_sign_identity: "Apple Distribution",
+      profile_name: ENV["sigh_#{ENV["BUNDLE_ID"]}_appstore_profile-name"],
+      build_configurations: ["Release"]
+    )
+
+    build_app(
+      workspace: "Runner.xcworkspace",
+      configuration: "Release",
+      scheme: "Runner",
+      export_method: "app-store",
+      export_options: {
+        provisioningProfiles: {
+          ENV["BUNDLE_ID"] => ENV["sigh_#{ENV["BUNDLE_ID"]}_appstore_profile-name"]
+        }
+      }
+    )
+
+    upload_to_testflight(
+      api_key: api_key,
+      app_identifier: ENV["BUNDLE_ID"],
+      skip_waiting_for_build_processing: true,
+      skip_submission: true
+    )
+
+    delete_keychain(name: ENV["TEMP_KEYCHAIN_NAME"])
+  end
+end

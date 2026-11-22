@@ -1,0 +1,94 @@
+name: Upload to TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: "Bundle Identifier (leave empty to use the BUNDLE_ID repo variable)"
+        required: false
+        default: ""
+        type: string
+      build_number:
+        description: "Build number (leave empty to use the commit count from build.ps1)"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  testflight:
+    name: Build & Upload to TestFlight
+    runs-on: macos-26
+    env:
+      BUNDLE_ID: ${{ github.event.inputs.bundle_id != '' && github.event.inputs.bundle_id || vars.BUNDLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      MATCH_DEPLOY_KEY: ${{ secrets.MATCH_DEPLOY_KEY }}
+      TEMP_KEYCHAIN_NAME: fastlane_tmp_keychain
+      TEMP_KEYCHAIN_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      # Set the MATCH_READONLY repo variable to "false" for the first run that
+      # must create and store the signing assets in the match repo. Remove it
+      # (or set "true") afterwards so later runs stay read-only.
+      MATCH_READONLY: ${{ vars.MATCH_READONLY }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check BUNDLE_ID
+        run: |
+          if [ -z "$BUNDLE_ID" ]; then
+            echo "::error::BUNDLE_ID is empty. Set the repo variable BUNDLE_ID or pass it as workflow input."
+            exit 1
+          fi
+
+      - name: Setup flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: ios
+
+      - name: Set and Extract version
+        shell: pwsh
+        run: lib/scripts/build.ps1
+
+      - name: Override build number
+        if: ${{ github.event.inputs.build_number != '' }}
+        env:
+          BUILD_NUMBER: ${{ github.event.inputs.build_number }}
+        run: |
+          # build.ps1 writes "version: <name>+<build>" into pubspec.yaml; replace
+          # the build part after '+' with the value passed to this workflow.
+          sed -i '' -E "s/^(version: [0-9A-Za-z.\-]+)\+[0-9]+/\1+${BUILD_NUMBER}/" pubspec.yaml
+          grep '^version:' pubspec.yaml
+
+      - name: Apply Patch
+        shell: pwsh
+        run: lib/scripts/patch.ps1 iOS
+
+      - name: Set Bundle Identifier
+        run: |
+          sed -i '' "s/com\.example\.piliplus/${BUNDLE_ID}/g" ios/Runner.xcodeproj/project.pbxproj
+
+      - name: Build & upload to TestFlight
+        working-directory: ios
+        run: bundle exec fastlane beta
+
+      - name: Upload IPA artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: testflight-ipa
+          path: build/ios/ipa/*.ipa
+          if-no-files-found: ignore
